@@ -1,0 +1,174 @@
+# EditaPDF - compila Android, Mac, Windows e web partendo dallo ZIP caricato nella repository.
+# Copyright © Ignazio Paolicelli
+name: Compila EditaPDF
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Estrai lo ZIP
+        shell: bash
+        run: unzip -q -o "$(ls *.zip | head -1)" -d src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Prepara la pagina
+        run: python src/scripts/prepara_web.py src/android/app/src/main/assets/www
+      - name: Compila APK
+        working-directory: src/android
+        run: gradle assembleRelease --no-daemon --stacktrace
+      - name: Rinomina
+        run: |
+          mkdir -p out
+          cp src/android/app/build/outputs/apk/release/app-release.apk out/EditaPDF-Android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: out/*
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Estrai lo ZIP
+        shell: bash
+        run: unzip -q -o "$(ls *.zip | head -1)" -d src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Prepara la pagina
+        run: python src/scripts/prepara_web.py src/desktop/app
+      - name: Installa
+        working-directory: src/desktop
+        run: npm install
+      - name: Compila app Mac
+        working-directory: src/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --mac dir --arm64 --x64 --publish never
+      - name: Firma (ad-hoc) e comprimi
+        run: |
+          mkdir -p out
+          codesign --force --deep --sign - src/desktop/dist/mac-arm64/EditaPDF.app
+          codesign --force --deep --sign - src/desktop/dist/mac/EditaPDF.app
+          ditto -c -k --keepParent src/desktop/dist/mac-arm64/EditaPDF.app out/EditaPDF-Mac-AppleSilicon.zip
+          ditto -c -k --keepParent src/desktop/dist/mac/EditaPDF.app out/EditaPDF-Mac-Intel.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: out/*
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Estrai lo ZIP
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem -Filter *.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath src -Force
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Prepara la pagina
+        run: python src/scripts/prepara_web.py src/desktop/app
+      - name: Installa
+        working-directory: src/desktop
+        run: npm install
+      - name: Compila app Windows
+        working-directory: src/desktop
+        run: npx electron-builder --win nsis portable --x64 --publish never
+      - name: Raccogli
+        shell: bash
+        run: |
+          mkdir -p out
+          cp src/desktop/dist/EditaPDF-Setup.exe out/
+          cp src/desktop/dist/EditaPDF-Portable.exe out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Estrai lo ZIP
+        shell: bash
+        run: unzip -q -o "$(ls *.zip | head -1)" -d src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepara il sito
+        run: python src/scripts/prepara_web.py sito
+      - name: Comprimi
+        run: |
+          mkdir -p out
+          cd sito && zip -r ../out/EditaPDF-Web.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: out/*
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: sito
+
+  sito:
+    # Funziona solo se in Settings > Pages hai scelto Source: "GitHub Actions"
+    needs: web
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pubblica.outputs.page_url }}
+    steps:
+      - id: pubblica
+        uses: actions/deploy-pages@v4
+
+  pubblica:
+    needs: [android, mac, windows, web]
+    if: ${{ always() && contains(needs.*.result, 'success') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Togli i file interni
+        run: rm -f out/artifact.tar
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: EditaPDF 1.0.${{ github.run_number }}
+          body: |
+            EditaPDF – Copyright © Ignazio Paolicelli
+            - Android: EditaPDF-Android.apk
+            - Mac (M1/M2/M3/M4): EditaPDF-Mac-AppleSilicon.zip
+            - Mac (Intel): EditaPDF-Mac-Intel.zip
+            - Windows: EditaPDF-Setup.exe (installazione) oppure EditaPDF-Portable.exe (senza installare)
+            - Web: EditaPDF-Web.zip
+          files: out/*
